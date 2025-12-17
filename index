@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#0b1020" />
+  <title>一指躲避</title>
+  <style>
+    html,body{height:100%;margin:0;background:#0b1020;color:#e8ecff;font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden}
+    #wrap{position:fixed;inset:0;display:flex;align-items:stretch;justify-content:center}
+    canvas{width:100%;height:100%;touch-action:none}
+    .hud{position:fixed;left:12px;top:12px;right:12px;display:flex;gap:10px;align-items:center;justify-content:space-between;pointer-events:none}
+    .pill{pointer-events:none;background:rgba(255,255,255,.08);backdrop-filter: blur(8px);border:1px solid rgba(255,255,255,.14);
+      border-radius:999px;padding:8px 12px;font-size:14px;line-height:1;display:flex;gap:10px;align-items:center}
+    .pill b{font-variant-numeric:tabular-nums}
+    .center{position:fixed;inset:0;display:grid;place-items:center;padding:20px}
+    .card{width:min(520px,92vw);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);
+      border-radius:18px;padding:18px 16px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+    .title{font-size:20px;font-weight:700;margin:0 0 8px}
+    .desc{opacity:.9;font-size:14px;line-height:1.6;margin:0 0 14px}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    button{appearance:none;border:0;border-radius:12px;padding:12px 14px;font-size:15px;font-weight:700;cursor:pointer}
+    .primary{background:#7c5cff;color:white}
+    .ghost{background:rgba(255,255,255,.1);color:#e8ecff;border:1px solid rgba(255,255,255,.14)}
+    .small{opacity:.8;font-size:12px;margin-top:10px;line-height:1.5}
+    .hint{position:fixed;bottom:10px;left:0;right:0;text-align:center;font-size:12px;opacity:.65;pointer-events:none}
+    a{color:#b9b4ff}
+  </style>
+</head>
+<body>
+  <div id="wrap"><canvas id="c"></canvas></div>
+
+  <div class="hud">
+    <div class="pill">分数 <b id="score">0</b></div>
+    <div class="pill">最高分 <b id="best">0</b></div>
+  </div>
+
+  <div class="center" id="overlay">
+    <div class="card">
+      <p class="title" id="ovTitle">一指躲避</p>
+      <p class="desc" id="ovDesc">
+        按住屏幕拖动小圆点左右移动，躲避下落方块。<br/>
+        坚持越久分越高，难度会逐渐增加。
+      </p>
+      <div class="row">
+        <button class="primary" id="btnStart">开始游戏</button>
+        <button class="ghost" id="btnAgain" style="display:none">再来一局</button>
+        <button class="ghost" id="btnPause" style="display:none">继续</button>
+      </div>
+      <div class="small">
+        小技巧：也支持鼠标拖动（电脑端）。<br/>
+        最高分保存在本机浏览器（不会上传）。
+      </div>
+    </div>
+  </div>
+
+  <div class="hint" id="hint">长按/拖动控制 | 双击空白处可暂停/继续</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  const $score = document.getElementById('score');
+  const $best  = document.getElementById('best');
+
+  const overlay = document.getElementById('overlay');
+  const ovTitle = document.getElementById('ovTitle');
+  const ovDesc  = document.getElementById('ovDesc');
+  const btnStart= document.getElementById('btnStart');
+  const btnAgain= document.getElementById('btnAgain');
+  const btnPause= document.getElementById('btnPause');
+
+  const DPR = () => Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+
+  let W=0,H=0,dpr=1;
+  function resize(){
+    dpr = DPR();
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width  = Math.floor(W * dpr);
+    canvas.height = Math.floor(H * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0); // 使用 CSS 像素坐标绘制
+  }
+  window.addEventListener('resize', resize, { passive:true });
+  resize();
+
+  // ===== 游戏状态 =====
+  const state = {
+    running:false,
+    paused:false,
+    t:0,
+    score:0,
+    best: Number(localStorage.getItem('dodge_best')||0),
+    lastTime:0,
+    difficulty:0,
+    shake:0,
+  };
+  $best.textContent = state.best;
+
+  const player = {
+    x: W*0.5,
+    y: H*0.82,
+    r: 16,
+    vx:0,
+    targetX: W*0.5,
+  };
+
+  let obstacles = [];
+  let spawnAcc = 0;
+
+  function reset(){
+    state.t = 0;
+    state.score = 0;
+    state.difficulty = 0;
+    state.shake = 0;
+    obstacles = [];
+    spawnAcc = 0;
+    player.x = W*0.5;
+    player.targetX = W*0.5;
+    player.y = H*0.82;
+    $score.textContent = '0';
+  }
+
+  function showOverlay(mode){
+    overlay.style.display = 'grid';
+    btnStart.style.display = mode==='start' ? 'inline-block' : 'none';
+    btnAgain.style.display = mode==='gameover' ? 'inline-block' : 'none';
+    btnPause.style.display = mode==='pause' ? 'inline-block' : 'none';
+
+    if(mode==='start'){
+      ovTitle.textContent = '一指躲避';
+      ovDesc.innerHTML = `按住屏幕拖动小圆点左右移动，躲避下落方块。<br/>坚持越久分越高，难度会逐渐增加。`;
+    } else if(mode==='gameover'){
+      ovTitle.textContent = '游戏结束';
+      ovDesc.innerHTML = `本局分数：<b>${state.score|0}</b><br/>最高分：<b>${state.best|0}</b>`;
+    } else if(mode==='pause'){
+      ovTitle.textContent = '已暂停';
+      ovDesc.innerHTML = `松手也可以，点“继续”或双击空白处继续。`;
+    }
+  }
+  function hideOverlay(){ overlay.style.display = 'none'; }
+
+  function start(){
+    reset();
+    state.running = true;
+    state.paused = false;
+    hideOverlay();
+    state.lastTime = performance.now();
+    requestAnimationFrame(loop);
+  }
+
+  function gameOver(){
+    state.running = false;
+    state.paused = false;
+    if(state.score > state.best){
+      state.best = state.score|0;
+      localStorage.setItem('dodge_best', String(state.best));
+      $best.textContent = state.best;
+    }
+    if (navigator.vibrate) navigator.vibrate([80,50,80]);
+    showOverlay('gameover');
+  }
+
+  function togglePause(){
+    if(!state.running) return;
+    state.paused = !state.paused;
+    if(state.paused){
+      showOverlay('pause');
+    }else{
+      hideOverlay();
+      state.lastTime = performance.now();
+      requestAnimationFrame(loop);
+    }
+  }
+
+  // ===== 控制：触摸/鼠标拖动 =====
+  function setTargetFromClientX(clientX){
+    const pad = 18;
+    player.targetX = Math.min(W-pad, Math.max(pad, clientX));
+  }
+
+  let dragging = false;
+  canvas.addEventListener('pointerdown', (e)=>{
+    dragging = true;
+    canvas.setPointerCapture(e.pointerId);
+    setTargetFromClientX(e.clientX);
+  });
+  canvas.addEventListener('pointermove', (e)=>{
+    if(!dragging) return;
+    setTargetFromClientX(e.clientX);
+  });
+  canvas.addEventListener('pointerup', (e)=>{
+    dragging = false;
+    try{ canvas.releasePointerCapture(e.pointerId); }catch(_){}
+  });
+  canvas.addEventListener('pointercancel', ()=> dragging=false);
+
+  // 双击暂停/继续
+  let lastTap=0;
+  window.addEventListener('pointerdown', (e)=>{
+    const now = performance.now();
+    if(now - lastTap < 280){
+      // 避免双击按钮区域
+      const target = e.target;
+      if(target === canvas || target === document.body || target === document.documentElement){
+        togglePause();
+      }
+    }
+    lastTap = now;
+  }, { passive:true });
+
+  // ===== 障碍生成 =====
+  function spawn(){
+    const minW = 18, maxW = 54;
+    const w = minW + Math.random()*(maxW-minW);
+    const h = w * (0.7 + Math.random()*0.8);
+    const x = 10 + Math.random()*(W - 20 - w);
+    const baseV = 180; // px/s
+    const v = baseV * (1.0 + state.difficulty*0.9) * (0.8 + Math.random()*0.5);
+    obstacles.push({ x, y: -h-10, w, h, v });
+  }
+
+  function circleRectHit(cx,cy,cr, rx,ry,rw,rh){
+    const nx = Math.max(rx, Math.min(cx, rx+rw));
+    const ny = Math.max(ry, Math.min(cy, ry+rh));
+    const dx = cx - nx, dy = cy - ny;
+    return dx*dx + dy*dy <= cr*cr;
+  }
+
+  // ===== 渲染 =====
+  function bg(){
+    // 简单渐变背景 + 星点
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#0b1020');
+    g.addColorStop(1,'#0a1a2c');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+
+    // 星点（伪随机：用时间轻微漂移）
+    const n = Math.floor((W*H)/42000);
+    for(let i=0;i<n;i++){
+      const sx = (Math.sin(i*999 + state.t*0.0006) * 0.5 + 0.5) * W;
+      const sy = (Math.sin(i*333 + state.t*0.0009) * 0.5 + 0.5) * H;
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      ctx.fillRect(sx, sy, 2, 2);
+    }
+  }
+
+  function draw(){
+    // 轻微震屏
+    const shake = state.shake;
+    if(shake > 0){
+      const ox = (Math.random()-0.5)*shake;
+      const oy = (Math.random()-0.5)*shake;
+      ctx.save(); ctx.translate(ox, oy);
+    }
+
+    bg();
+
+    // 障碍
+    for(const o of obstacles){
+      ctx.fillStyle = 'rgba(255, 90, 140, 0.92)';
+      ctx.fillRect(o.x, o.y, o.w, o.h);
+      ctx.fillStyle = 'rgba(255,255,255,0.18)';
+      ctx.fillRect(o.x, o.y, o.w, Math.max(2, o.h*0.12));
+    }
+
+    // 玩家
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r, 0, Math.PI*2);
+    ctx.fillStyle = '#6ee7ff';
+    ctx.fill();
+
+    // 轻微光晕
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r*1.8, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(110,231,255,0.10)';
+    ctx.fill();
+
+    if(shake > 0) ctx.restore();
+  }
+
+  // ===== 主循环 =====
+  function loop(now){
+    if(!state.running || state.paused) return;
+
+    const dt = Math.min(0.033, (now - state.lastTime)/1000); // 防卡顿爆炸
+    state.lastTime = now;
+    state.t += dt*1000;
+
+    // 难度随时间提高
+    state.difficulty = Math.min(2.5, state.t/1000/45); // 45s到2.5
+    // 玩家移动（带一点平滑）
+    const maxSpeed = 900; // px/s
+    const ax = (player.targetX - player.x) * 18; // 简单弹簧
+    player.vx += ax * dt;
+    player.vx *= Math.pow(0.001, dt); // 阻尼
+    player.vx = Math.max(-maxSpeed, Math.min(maxSpeed, player.vx));
+    player.x += player.vx * dt;
+
+    // 边界
+    player.x = Math.max(player.r+6, Math.min(W - player.r-6, player.x));
+
+    // 生成频率：越久越快
+    const spawnRate = 0.8 + state.difficulty*1.6; // 次/秒
+    spawnAcc += dt * spawnRate;
+    while(spawnAcc >= 1){
+      spawn();
+      spawnAcc -= 1;
+    }
+
+    // 更新障碍 + 碰撞
+    for(const o of obstacles) o.y += o.v * dt;
+
+    // 移除屏外
+    obstacles = obstacles.filter(o => o.y < H + 120);
+
+    // 碰撞检测
+    for(const o of obstacles){
+      if(circleRectHit(player.x, player.y, player.r, o.x, o.y, o.w, o.h)){
+        state.shake = 10;
+        gameOver();
+        draw();
+        return;
+      }
+    }
+
+    // 震屏衰减
+    state.shake = Math.max(0, state.shake - dt*30);
+
+    // 计分：按时间+难度
+    state.score += (dt * (60 + state.difficulty*80));
+    $score.textContent = (state.score|0);
+
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // ===== UI 按钮 =====
+  btnStart.addEventListener('click', start);
+  btnAgain.addEventListener('click', start);
+  btnPause.addEventListener('click', togglePause);
+
+  // 初始画面
+  draw();
+  showOverlay('start');
+})();
+</script>
+</body>
+</html>
